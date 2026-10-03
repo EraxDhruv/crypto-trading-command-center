@@ -1,7 +1,9 @@
 import json,time
 from pathlib import Path
+import numpy as np
 import pandas as pd, requests, streamlit as st
 import streamlit.components.v1 as components
+import plotly.graph_objects as go
 
 st.set_page_config(page_title="Crypto Trading Command Center",page_icon="📈",layout="wide")
 API="https://api.hyperliquid.xyz/info"
@@ -50,130 +52,217 @@ def candles(coin,tf,limit=500):
     d=d.rename(columns={"o":"open","h":"high","l":"low","c":"close","v":"volume"})
     return d[["time","open","high","low","close","volume"]].dropna().tail(limit).reset_index(drop=True)
 
-def rma(s,n): return s.ewm(alpha=1/n,adjust=False,min_periods=n).mean()
+def rma(s,n):
+    return s.ewm(alpha=1/n,adjust=False,min_periods=n).mean()
 
 def superkumo(d):
     d=d.copy()
+    # Ichimoku 9/26/52. span_a/span_b are shifted 26 candles because
+    # the cloud is projected forward by 26 candles.
     d["tenkan"]=(d.high.rolling(9).max()+d.low.rolling(9).min())/2
     d["kijun"]=(d.high.rolling(26).max()+d.low.rolling(26).min())/2
-    d["span_a"]=(d.tenkan+d.kijun)/2
-    d["span_b"]=(d.high.rolling(52).max()+d.low.rolling(52).min())/2
-    tr=pd.concat([d.high-d.low,(d.high-d.close.shift()).abs(),(d.low-d.close.shift()).abs()],axis=1).max(axis=1)
-    atr=rma(tr,10); hl2=(d.high+d.low)/2
-    up=hl2+3*atr; lo=hl2-3*atr; stv=pd.Series(index=d.index,dtype=float); direction=pd.Series(index=d.index,dtype=float)
+    d["span_a_raw"]=(d.tenkan+d.kijun)/2
+    d["span_b_raw"]=(d.high.rolling(52).max()+d.low.rolling(52).min())/2
+    d["span_a"]=d.span_a_raw.shift(26)
+    d["span_b"]=d.span_b_raw.shift(26)
+    d["cloud_top"]=d[["span_a","span_b"]].max(axis=1)
+    d["cloud_bot"]=d[["span_a","span_b"]].min(axis=1)
+
+    tr=pd.concat([d.high-d.low,(d.high-d.close.shift()).abs(),
+                  (d.low-d.close.shift()).abs()],axis=1).max(axis=1)
+    atr=rma(tr,10)
+    mid=(d.high+d.low)/2
+    upper=mid+3*atr
+    lower=mid-3*atr
+    final_u=upper.copy(); final_l=lower.copy()
+    stv=pd.Series(np.nan,index=d.index); direction=pd.Series(np.nan,index=d.index)
     for i in range(len(d)):
-        if i==0: stv.iloc[i]=up.iloc[i]; direction.iloc[i]=-1
-        else:
-            pu,pl=up.iloc[i-1],lo.iloc[i-1]
-            up.iloc[i]=min(up.iloc[i],pu) if d.close.iloc[i-1]<=pu else up.iloc[i]
-            lo.iloc[i]=max(lo.iloc[i],pl) if d.close.iloc[i-1]>=pl else lo.iloc[i]
-            if direction.iloc[i-1]<0:
-                direction.iloc[i]=1 if d.close.iloc[i]>up.iloc[i] else -1
-            else: direction.iloc[i]=-1 if d.close.iloc[i]<lo.iloc[i] else 1
-            stv.iloc[i]=lo.iloc[i] if direction.iloc[i]>0 else up.iloc[i]
+        if i==0:
+            direction.iloc[i]=1
+            continue
+        if pd.isna(atr.iloc[i]):
+            direction.iloc[i]=direction.iloc[i-1]
+            continue
+        final_u.iloc[i]=upper.iloc[i] if (upper.iloc[i]<final_u.iloc[i-1] or d.close.iloc[i-1]>final_u.iloc[i-1]) else final_u.iloc[i-1]
+        final_l.iloc[i]=lower.iloc[i] if (lower.iloc[i]>final_l.iloc[i-1] or d.close.iloc[i-1]<final_l.iloc[i-1]) else final_l.iloc[i-1]
+        direction.iloc[i]=1 if (direction.iloc[i-1]>0 and d.close.iloc[i]>=final_l.iloc[i]) or (direction.iloc[i-1]<=0 and d.close.iloc[i]>final_u.iloc[i]) else -1
+        stv.iloc[i]=final_l.iloc[i] if direction.iloc[i]>0 else final_u.iloc[i]
+
     plus=d.high.diff(); minus=-d.low.diff()
-    p=plus.where((plus>minus)&(plus>0),0); m=minus.where((minus>plus)&(minus>0),0)
-    di_p=100*rma(p,14)/rma(tr,14); di_m=100*rma(m,14)/rma(tr,14)
-    dx=100*(di_p-di_m).abs()/(di_p+di_m); d["adx"]=rma(dx,14)
-    d["supertrend"]=stv; d["st_dir"]=direction
-    d["cloud_top"]=d[["span_a","span_b"]].max(axis=1); d["cloud_bot"]=d[["span_a","span_b"]].min(axis=1)
-    d["cloud"]="ABOVE"; d.loc[d.close<d.cloud_bot,"cloud"]="BELOW"; d.loc[d.close.between(d.cloud_bot,d.cloud_top),"cloud"]="INSIDE"
-    d["future_green"]=d.span_a>d.span_b
+    p=plus.where((plus>minus)&(plus>0),0.0)
+    m=minus.where((minus>plus)&(minus>0),0.0)
+    dip=100*rma(p,14)/rma(tr,14); dim=100*rma(m,14)/rma(tr,14)
+    dx=100*(dip-dim).abs()/(dip+dim).replace(0,np.nan)
+    d["atr"]=atr; d["supertrend"]=stv; d["st_dir"]=direction
+    d["di_plus"]=dip; d["di_minus"]=dim; d["adx"]=rma(dx,14)
+    d["adx_rising"]=d.adx>d.adx.shift(1)
+
+    d["cloud"]="INSIDE"
+    d.loc[d.close>d.cloud_top,"cloud"]="ABOVE"
+    d.loc[d.close<d.cloud_bot,"cloud"]="BELOW"
+    d["future_green"]=d.span_a_raw>d.span_b_raw
+
+    # 3-candle-confirmed swing levels.
+    d["swing_high"]=(d.high>d.high.shift(1))&(d.high>d.high.shift(2))&(d.high>=d.high.shift(-1))&(d.high>=d.high.shift(-2))
+    d["swing_low"]=(d.low<d.low.shift(1))&(d.low<d.low.shift(2))&(d.low<=d.low.shift(-1))&(d.low<=d.low.shift(-2))
+
+    d["early_buy"]=(d.st_dir>0)&(d.st_dir.shift(1)<=0)
+    d["early_sell"]=(d.st_dir<0)&(d.st_dir.shift(1)>=0)
+    full_buy=(d.cloud=="ABOVE")&(d.st_dir>0)&(d.adx>=20)&d.future_green
+    full_sell=(d.cloud=="BELOW")&(d.st_dir<0)&(d.adx>=20)&(~d.future_green)
     d["signal"]="NONE"
-    buy=(d.cloud=="ABOVE")&(d.st_dir>0)&(d.adx>=20)&d.future_green
-    sell=(d.cloud=="BELOW")&(d.st_dir<0)&(d.adx>=20)&(~d.future_green)
-    d.loc[buy,"signal"]="BUY"; d.loc[sell,"signal"]="SELL"
+    d.loc[d.early_buy,"signal"]="EARLY BUY"
+    d.loc[d.early_sell,"signal"]="EARLY SELL"
+    d.loc[full_buy,"signal"]="BUY"
+    d.loc[full_sell,"signal"]="SELL"
+    for i in range(len(d)):
+        if full_buy.iloc[i] and d.early_buy.iloc[max(0,i-8):i+1].any():
+            d.iloc[i,d.columns.get_loc("signal")]="BUY MORE"
+
+    add=(d.st_dir>0)&(d.close.shift(1)<=d.tenkan.shift(1))&(d.close>d.tenkan)&(d.low<=d.kijun*1.01)&(d.close>d.kijun)
+    risky=(d.st_dir>0)&(d.adx>=20)&(d.close.shift(1)<=d.tenkan.shift(1))&(d.close>d.tenkan)&(d.low>d.kijun*1.01)
+    d.loc[add&(d.signal=="NONE"),"signal"]="ADD"
+    d.loc[risky&(d.signal=="NONE"),"signal"]="RISKY ADD"
     return d
 
+def levels(d):
+    x=d.dropna(subset=["close"]).copy()
+    price=float(x.close.iloc[-1])
+    atr=float(x.atr.iloc[-1]) if pd.notna(x.atr.iloc[-1]) else price*0.03
+    lows=x.loc[x.swing_low,"low"].dropna().tolist()
+    highs=x.loc[x.swing_high,"high"].dropna().tolist()
+    def cluster(vals):
+        vals=sorted(vals); out=[]
+        for v in vals:
+            if not out or abs(v-out[-1])>max(atr*.75,price*.008): out.append(v)
+            else: out[-1]=(out[-1]+v)/2
+        return out
+    supports=sorted([v for v in cluster(lows) if v<price],reverse=True)
+    resistances=sorted([v for v in cluster(highs) if v>price])
+    return supports[:4],resistances[:4],atr
+
+def fmt(v):
+    if v is None or pd.isna(v): return "—"
+    v=float(v)
+    if abs(v)>=1000:return f"{v:,.0f}"
+    if abs(v)>=100:return f"{v:,.2f}"
+    if abs(v)>=1:return f"{v:,.3f}"
+    return f"{v:,.5f}"
+
+def build_plan(d1,h4):
+    s=d1.iloc[-1]; q=h4.iloc[-1]; price=float(s.close)
+    supports,resistances,atr=levels(d1)
+    daily_bull=s.cloud=="ABOVE" and s.st_dir>0 and s.adx>=20 and bool(s.future_green)
+    daily_bear=s.cloud=="BELOW" and s.st_dir<0 and s.adx>=20 and not bool(s.future_green)
+    h4_bull=q.st_dir>0 and q.adx>=20 and q.cloud!="BELOW"
+    h4_bear=q.st_dir<0 and q.adx>=20 and q.cloud!="ABOVE"
+    verdict="BUY" if daily_bull and h4_bull else "SELL" if daily_bear and h4_bear else "WAIT" if daily_bull else "HOLD"
+    signal=str(s.signal)
+    if signal=="NONE":
+        recent=d1.tail(12); m=recent[recent.signal!="NONE"]
+        signal=str(m.signal.iloc[-1]) if len(m) else "NONE"
+    kijun=float(s.kijun) if pd.notna(s.kijun) else price
+    pull_low=max(supports[0]*.995,kijun-atr*.35) if supports else kijun-atr*.35
+    pull_high=min(kijun+atr*.20,price)
+    if verdict=="BUY":
+        entry=price
+        candidates=[v for v in [float(s.cloud_bot) if pd.notna(s.cloud_bot) else None,supports[0] if supports else None,float(s.supertrend) if pd.notna(s.supertrend) else None] if v and v<price]
+        stop=max(candidates)-atr*.15 if candidates else price-1.5*atr
+        tps=resistances[:2] if len(resistances)>=2 else [price+2*atr,price+4*atr]
+    elif verdict=="SELL":
+        entry=price
+        candidates=[v for v in [float(s.cloud_top) if pd.notna(s.cloud_top) else None,resistances[0] if resistances else None,float(s.supertrend) if pd.notna(s.supertrend) else None] if v and v>price]
+        stop=min(candidates)+atr*.15 if candidates else price+1.5*atr
+        tps=supports[:2] if len(supports)>=2 else [price-2*atr,price-4*atr]
+    else:
+        entry=kijun; stop=supports[0]-atr*.15 if supports else kijun-1.25*atr
+        tps=resistances[:2] if len(resistances)>=2 else [price+2*atr,price+4*atr]
+    risk=abs(entry-stop)
+    return dict(verdict=verdict,signal=signal,price=price,daily=s,h4=q,entry=entry,stop=stop,
+                tp1=float(tps[0]),tp2=float(tps[1]),rr1=abs(tps[0]-entry)/risk if risk else np.nan,
+                rr2=abs(tps[1]-entry)/risk if risk else np.nan,support=supports[0] if supports else None,
+                resistance=resistances[0] if resistances else None,pull_low=pull_low,pull_high=pull_high)
+
+def native_chart(d):
+    x=d.tail(220)
+    fig=go.Figure()
+    fig.add_trace(go.Candlestick(x=x.time,open=x.open,high=x.high,low=x.low,close=x.close,name="Price"))
+    fig.add_trace(go.Scatter(x=x.time,y=x.tenkan,name="Tenkan 9",line=dict(width=1)))
+    fig.add_trace(go.Scatter(x=x.time,y=x.kijun,name="Kijun 26",line=dict(width=1.5)))
+    fig.add_trace(go.Scatter(x=x.time,y=x.span_a,name="Cloud A",line=dict(width=1)))
+    fig.add_trace(go.Scatter(x=x.time,y=x.span_b,name="Cloud B",fill="tonexty",fillcolor="rgba(70,160,90,.16)",line=dict(width=1)))
+    fig.add_trace(go.Scatter(x=x.time,y=x.supertrend,name="Supertrend",line=dict(width=2)))
+    b=x[x.signal.isin(["BUY","BUY MORE","ADD","RISKY ADD"])]
+    se=x[x.signal.isin(["SELL","EARLY SELL"])]
+    fig.add_trace(go.Scatter(x=b.time,y=b.low*.995,mode="markers",name="Buy signals",marker=dict(size=9,symbol="triangle-up")))
+    fig.add_trace(go.Scatter(x=se.time,y=se.high*1.005,mode="markers",name="Sell signals",marker=dict(size=9,symbol="triangle-down")))
+    fig.update_layout(height=620,template="plotly_dark",margin=dict(l=10,r=10,t=30,b=10),xaxis_rangeslider_visible=False,legend=dict(orientation="h"))
+    return fig
 def tv_symbol(x):
     x=x.strip().upper()
     if ":" in x:return x
-    x=x.replace("USDT.P","").replace(".P","").replace("USDT","").replace("USD","")
-    return "BYBIT:"+x+"USDT.P"
+    return "HYPERLIQUID:"+x.replace("USDT.P","").replace(".P","").replace("USDT","")+"USDT.P"
 
 def tv(sym,interval):
-    cfg={"symbol":sym,"interval":interval,"theme":"dark","style":"1","locale":"en","enable_publishing":False,"hide_top_toolbar":False,"hide_legend":False,"allow_symbol_change":True,"studies":["IchimokuCloud@tv-basicstudies","Supertrend@tv-basicstudies","ADX@tv-basicstudies"],"container_id":"tvchart"}
-    import json
-    html=f'''<div id="tvchart" style="height:620px"></div><script src="https://s3.tradingview.com/external-embedding/embed-widget-advanced-chart.js" async>{json.dumps(cfg)}</script>'''
-    components.html(html,height=640)
-
-tabs=st.tabs(["📊 Overview","💼 Hyperliquid Wallet","☁️ SuperKumo","👀 Watchlist","📝 Journal"])
-
-with tabs[0]:
-    st.title("Crypto Trading Command Center")
-    st.caption("Live read-only Hyperliquid tracking • SuperKumo analysis")
-    try:
-        w,e=wallet_state(); s=w.get("state") or {}; p=positions(s)
-        ms=s.get("marginSummary",{}) or {}
-        c1,c2,c3,c4=st.columns(4)
-        c1.metric("Account Value",f"$ {float(ms.get('accountValue',0) or 0):,.2f}")
-        c2.metric("Perp Exposure",f"$ {float(ms.get('totalNtlPos',0) or 0):,.2f}")
-        c3.metric("Margin Used",f"$ {float(ms.get('totalMarginUsed',0) or 0):,.2f}")
-        c4.metric("Open Positions",len(p))
-        if e: st.warning("Some wallet endpoints failed: "+" | ".join(e))
-        if len(p): st.dataframe(p,use_container_width=True,hide_index=True)
-        else: st.info("No open perp positions returned by Hyperliquid.")
-    except Exception as ex: st.error(str(ex))
-
-with tabs[1]:
-    st.header("💼 Hyperliquid Wallet")
-    st.code(WALLET)
-    if st.button("🔄 Refresh live wallet",type="primary"):
-        st.cache_data.clear()
-    try:
-        w,e=wallet_state(); s=w.get("state") or {}; ms=s.get("marginSummary",{}) or {}; p=positions(s)
-        a,b,c,d=st.columns(4)
-        a.metric("Equity",f"$ {float(ms.get('accountValue',0) or 0):,.2f}")
-        b.metric("Position Value",f"$ {float(ms.get('totalNtlPos',0) or 0):,.2f}")
-        c.metric("Margin Used",f"$ {float(ms.get('totalMarginUsed',0) or 0):,.2f}")
-        d.metric("Withdrawable",f"$ {float(s.get('withdrawable',0) or 0):,.2f}")
-        if len(p): st.dataframe(p,use_container_width=True,hide_index=True)
-        else: st.info("No open positions returned.")
-        if e: st.error("\n".join(e))
-        with st.expander("Open orders"): st.dataframe(pd.DataFrame(w.get("orders") or []),use_container_width=True,hide_index=True)
-        with st.expander("Recent fills"): st.dataframe(pd.DataFrame(w.get("fills") or []).head(100),use_container_width=True,hide_index=True)
-    except Exception as ex: st.error(f"Wallet error: {ex}")
+    cfg={"autosize":True,"symbol":sym,"interval":interval,"theme":"dark","style":"1",
+         "withdateranges":True,"hide_side_toolbar":False,"allow_symbol_change":True,
+         "save_image":False,"studies":["IchimokuCloud@tv-basicstudies","Supertrend@tv-basicstudies","ADX@tv-basicstudies"],
+         "locale":"en","support_host":"https://www.tradingview.com"}
+    html=f'''<div id="tvchart" style="height:680px"></div>
+<script src="https://s3.tradingview.com/external-embedding/embed-widget-advanced-chart.js" async>{json.dumps(cfg)}</script>'''
+    components.html(html,height=700)
 
 with tabs[2]:
     st.header("☁️ SuperKumo Analyzer")
-    coin=st.text_input("Hyperliquid perp",value="ENA",placeholder="ENA / HYPE / NEAR / BTC")
-    tf=st.selectbox("TradingView timeframe",["1D","4H","3D","1H"])
-    if st.button("🔍 Load & Analyze",type="primary"):
+    st.caption("1D = direction • 4H = adds/exits • 3D = context • signals after candle close")
+    a,b,c=st.columns([2,1,1])
+    with a: coin=st.text_input("Hyperliquid perp",value="TAO",placeholder="TAO / ENA / HYPE / NEAR / BTC").upper().strip()
+    with b: tv_tf=st.selectbox("Chart timeframe",["1D","4H","3D","1H"])
+    with c:
+        run=st.button("🔍 Analyze",type="primary",use_container_width=True)
+    if run or st.session_state.get("sk_coin")==coin:
+        st.session_state["sk_coin"]=coin
         try:
-            d1=superkumo(candles(coin.upper(),"1d")); h4=superkumo(candles(coin.upper(),"4h")); d3=superkumo(candles(coin.upper(),"3d"))
-            if d1.empty or h4.empty: st.error("No Hyperliquid candles returned. Check the perp name.")
+            d1=superkumo(candles(coin,"1d")); h4=superkumo(candles(coin,"4h")); d3=superkumo(candles(coin,"3d"))
+            if d1.empty or h4.empty or d3.empty: st.error("No Hyperliquid candles returned. Check the perp name.")
             else:
-                s=d1.iloc[-1]; q=h4.iloc[-1]; z=d3.iloc[-1]
-                daily=(s.cloud=="ABOVE" and s.st_dir>0 and s.adx>=20 and s.future_green)
-                confirm=(q.st_dir>0 and q.adx>=20 and q.cloud!="BELOW")
-                verdict="BUY" if daily and confirm else "WAIT" if daily else "SELL" if s.cloud=="BELOW" and s.st_dir<0 and s.adx>=20 else "HOLD"
-                st.subheader(f"SuperKumo verdict: {verdict}")
-                st.write("Daily direction + 4H timing + 3D context. Prefer pullbacks to Kijun/support rather than chasing.")
-                x,y,zcol=st.columns(3)
-                for col,title,r in [(x,"1D — Direction",s),(y,"4H — Timing",q),(zcol,"3D — Context",z)]:
-                    with col:
-                        st.markdown("### "+title); st.metric("Price",f"{r.close:.8g}")
-                        st.write(f"Cloud: **{r.cloud}**  \\nSupertrend: **{'UP' if r.st_dir>0 else 'DOWN'}**  \\nADX: **{r.adx:.1f}**  \\nFuture cloud: **{'GREEN' if r.future_green else 'RED'}**")
-                        st.caption(f"Tenkan {r.tenkan:.8g} • Kijun {r.kijun:.8g} • Supertrend {r.supertrend:.8g}")
+                p=build_plan(d1,h4); s,q,z=p["daily"],p["h4"],d3.iloc[-1]
+                st.divider()
+                x1,x2,x3,x4=st.columns(4)
+                x1.metric("VERDICT",p["verdict"]); x2.metric("SIGNAL",p["signal"]); x3.metric("PRICE",fmt(p["price"])); x4.metric("DAILY ADX",f"{s.adx:.1f}")
+                st.markdown("### Decision")
+                st.write(f"**Daily:** {s.cloud} cloud • Supertrend {'UP' if s.st_dir>0 else 'DOWN'} • ADX {s.adx:.1f} • Future cloud {'GREEN' if s.future_green else 'RED'}")
+                st.write(f"**4H:** {q.cloud} cloud • Supertrend {'UP' if q.st_dir>0 else 'DOWN'} • ADX {q.adx:.1f}")
+                st.write(f"**3D:** {z.cloud} cloud • Supertrend {'UP' if z.st_dir>0 else 'DOWN'} • ADX {z.adx:.1f}")
+                a,b,c,d=st.columns(4)
+                a.metric("Entry / Trigger",fmt(p["entry"])); b.metric("Stop",fmt(p["stop"])); c.metric("TP1",fmt(p["tp1"])); d.metric("TP2",fmt(p["tp2"]))
+                a,b,c,d=st.columns(4)
+                a.metric("R:R → TP1",f"{p['rr1']:.2f}"); b.metric("R:R → TP2",f"{p['rr2']:.2f}"); c.metric("Support",fmt(p["support"])); d.metric("Resistance",fmt(p["resistance"]))
+                st.info(f"Preferred pullback zone: {fmt(p['pull_low'])} – {fmt(p['pull_high'])}. Avoid chasing extended candles.")
+                reasons=[
+                    "price above daily cloud" if s.cloud=="ABOVE" else "price below daily cloud" if s.cloud=="BELOW" else "price inside daily cloud",
+                    "daily Supertrend UP" if s.st_dir>0 else "daily Supertrend DOWN",
+                    f"ADX {'passing' if s.adx>=20 else 'below'} 20",
+                    "future cloud green" if s.future_green else "future cloud red",
+                    "4H confirms" if (q.st_dir>0 and q.adx>=20) else "4H not fully confirming"
+                ]
+                st.markdown("**Why:** "+" • ".join(reasons)+".")
+                st.subheader("SuperKumo chart — Hyperliquid data")
+                st.plotly_chart(native_chart(d1),use_container_width=True)
                 st.subheader("TradingView")
-                tv(tv_symbol(coin),"D" if tf=="1D" else "240" if tf=="4H" else "3D" if tf=="3D" else "60")
-                st.info("The TradingView widget shows built-in Ichimoku, Supertrend and ADX. The SuperKumo decision is calculated separately from Hyperliquid candles.")
-                st.dataframe(d1[["time","close","tenkan","kijun","span_a","span_b","supertrend","adx","cloud","future_green","signal"]].tail(30),use_container_width=True,hide_index=True)
-        except Exception as ex: st.error(f"Analysis error: {ex}")
+                interval={"1D":"D","4H":"240","3D":"3D","1H":"60"}[tv_tf]
+                tv(tv_symbol(coin),interval)
+                st.caption("The TradingView chart uses the Hyperliquid feed. The SuperKumo verdict and levels above are independently calculated from Hyperliquid candles.")
+                with st.expander("Indicator values"):
+                    st.dataframe(d1[["time","close","tenkan","kijun","span_a","span_b","supertrend","adx","cloud","future_green","signal"]].tail(40),use_container_width=True,hide_index=True)
+                with st.expander("SuperKumo rules"):
+                    st.markdown("**EARLY BUY:** Supertrend flip up.  
+**BUY:** above cloud + Supertrend up + ADX ≥20 + future cloud green.  
+**BUY MORE:** BUY within 8 candles of EARLY BUY.  
+**ADD:** uptrend + Kijun pullback + close back above Tenkan.  
+**RISKY ADD:** shallow Tenkan reclaim with ADX ≥20.  
+**SELL:** inverse conditions.  
+**S/R:** 3-candle-confirmed swing highs/lows.")
+        except Exception as ex: st.error(f"SuperKumo error: {ex}")
 
-with tabs[3]:
-    st.header("👀 Watchlist")
-    f=DATA/"watchlist.csv"
-    df=pd.read_csv(f) if f.exists() else pd.DataFrame(columns=["Coin","Notes","Status"])
-    ed=st.data_editor(df,num_rows="dynamic",use_container_width=True,hide_index=True)
-    if st.button("Save Watchlist"): ed.to_csv(f,index=False); st.success("Saved.")
 
-with tabs[4]:
-    st.header("📝 Journal")
-    f=DATA/"journal.csv"
-    df=pd.read_csv(f) if f.exists() else pd.DataFrame()
-    ed=st.data_editor(df,num_rows="dynamic",use_container_width=True,hide_index=True)
-    if st.button("Save Journal"): ed.to_csv(f,index=False); st.success("Saved.")
-
-st.divider()
-st.caption("Read-only Hyperliquid tracking. No orders are signed or submitted.")
