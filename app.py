@@ -93,9 +93,17 @@ def _normalize_candles(d, limit=500):
     d["time"]=pd.to_datetime(raw_time,unit="ms",utc=True,errors="coerce")
     if d["time"].isna().all():
         d["time"]=pd.to_datetime(raw_time,utc=True,errors="coerce")
+    # HyperAcademy's hourly export can be snapshot-style (timestamp + price)
+    # rather than full OHLC. Build synthetic OHLC from the price snapshots;
+    # daily/4H/3D aggregation then remains usable for SuperKumo.
+    if not all(c in d.columns for c in ["open","high","low","close"]):
+        price_col=next((c for c in ["price","mark_price","mark","value","last","close"] if c in d.columns),None)
+        if price_col is not None:
+            px=pd.to_numeric(d[price_col],errors="coerce")
+            d["open"]=px; d["high"]=px; d["low"]=px; d["close"]=px
+        else:
+            raise RuntimeError("External candle data has neither OHLC nor a price column")
     for c in ["open","high","low","close"]:
-        if c not in d.columns:
-            raise RuntimeError(f"External candle data has no {c} column")
         d[c]=pd.to_numeric(d[c],errors="coerce")
     if "volume" not in d.columns:
         d["volume"]=0.0
