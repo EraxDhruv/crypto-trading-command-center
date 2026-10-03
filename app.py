@@ -76,13 +76,35 @@ def resolve_coin(coin):
     return c
 
 def candles(coin,tf,limit=500):
-    ms={"4h":14400000,"1d":86400000,"3d":259200000}[tf]; end=int(time.time()*1000)
+    # Some newer HIP-3 markets do not have history as far back as native
+    # markets. Start with a large window, then automatically retry with a
+    # shorter window if Hyperliquid rejects the older range.
+    ms={"4h":14400000,"1d":86400000,"3d":259200000}[tf]
+    end=int(time.time()*1000)
     api_coin=resolve_coin(coin)
-    raw=api({"type":"candleSnapshot","req":{"coin":api_coin,"interval":tf,"startTime":end-ms*(limit+5),"endTime":end}})
+    windows=[limit]
+    if limit >= 500:
+        windows += [180,120,100]
+    last_error=None
+    raw=None
+    for n in windows:
+        start=end-ms*(n+5)
+        try:
+            raw=api({"type":"candleSnapshot","req":{
+                "coin":api_coin,"interval":tf,"startTime":start,"endTime":end
+            }})
+            if raw:
+                break
+        except requests.HTTPError as e:
+            last_error=e
+            continue
+    if raw is None:
+        raise last_error if last_error else RuntimeError("No candle data returned")
     d=pd.DataFrame(raw)
     if d.empty:return d
     d["time"]=pd.to_datetime(d.t,unit="ms",utc=True)
-    for c in "ohlcv": d[c]=pd.to_numeric(d[{"o":"o","h":"h","l":"l","c":"c","v":"v"}[c]],errors="coerce")
+    for c in "ohlcv":
+        d[c]=pd.to_numeric(d[{"o":"o","h":"h","l":"l","c":"c","v":"v"}[c]],errors="coerce")
     d=d.rename(columns={"o":"open","h":"high","l":"low","c":"close","v":"volume"})
     return d[["time","open","high","low","close","volume"]].dropna().tail(limit).reset_index(drop=True)
 
@@ -360,7 +382,7 @@ with tabs[2]:
 **S/R:** 3-candle-confirmed swing highs/lows.
 """)
         except requests.HTTPError as ex:
-            st.error("SuperKumo API error: " + str(ex) + ". The app now resolves HIP-3 tickers to their DEX-qualified market name automatically.")
+            st.error("SuperKumo API error: " + str(ex) + ". Try the bare ticker for native perps (ETH/ENA/TAO) or the DEX-qualified form for HIP-3 markets (e.g. xyz:CRCL).")
         except Exception as ex: st.error(f"SuperKumo error: {ex}")
 
 
