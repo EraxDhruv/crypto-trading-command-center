@@ -44,32 +44,22 @@ def positions(state):
 
 @st.cache_data(ttl=300)
 def market_coin_map():
-    """Discover HIP-3 dex markets. Failure here must never block normal analysis."""
     mapping={}
     try:
-        dexs=api({"type":"perpDexs"}) or []
-        for dex in dexs:
-            if not dex or not isinstance(dex,dict) or not dex.get("name"):
+        metas=api({"type":"allPerpMetas"}) or []
+        for dex_meta in metas:
+            if not isinstance(dex_meta,dict):
                 continue
-            dex_name=str(dex["name"]).lower()
-            try:
-                meta=api({"type":"meta","dex":dex_name})
-                for u in (meta or {}).get("universe",[]):
-                    name=str(u.get("name","")).upper()
-                    if name:
-                        mapping.setdefault(name.split(":")[-1],[]).append(name)
-                        mapping[name]=[name]
-            except Exception:
-                continue
+            for u in (dex_meta.get("universe") or []):
+                name=str(u.get("name","")).upper().strip()
+                if not name:
+                    continue
+                bare=name.split(":")[-1]
+                mapping.setdefault(bare,[]).append(name)
+                mapping[name]=[name]
     except Exception:
         pass
     return mapping
-
-# Known HIP-3 markets that should work even if the discovery endpoint
-# temporarily returns an HTTP 500 from a hosted environment.
-KNOWN_HIP3={
-    "CRCL":"xyz:CRCL",
-}
 
 def resolve_coin(coin):
     c=coin.strip().upper()
