@@ -80,8 +80,13 @@ def _normalize_candles(d, limit=500):
     if d is None or len(d)==0:
         return pd.DataFrame(columns=["time","open","high","low","close","volume"])
     d=d.copy()
-    d=d.rename(columns={"t":"time","T":"time","timestamp":"time","date":"time",
-                        "o":"open","h":"high","l":"low","c":"close","v":"volume"})
+    # External CSV providers may use Open/High/Low/Close or other casing.
+    # Normalize headers before mapping them to our internal schema.
+    d.columns=[str(x).strip().lower() for x in d.columns]
+    d=d.rename(columns={"t":"time","timestamp":"time","datetime":"time","date":"time",
+                        "o":"open","h":"high","l":"low","c":"close","v":"volume",
+                        "open price":"open","high price":"high","low price":"low",
+                        "close price":"close","vol":"volume"})
     if "time" not in d.columns:
         raise RuntimeError("External candle data has no timestamp column")
     raw_time=d["time"].copy()
