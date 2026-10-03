@@ -2,6 +2,7 @@ import json,time
 from pathlib import Path
 import numpy as np
 import pandas as pd, requests, streamlit as st
+from io import StringIO
 import streamlit.components.v1 as components
 import plotly.graph_objects as go
 
@@ -75,47 +76,88 @@ def resolve_coin(coin):
     # Native Hyperliquid perps use the bare ticker; avoid metadata discovery here because hosted API can return HTTP 500.
     return c
 
+def _normalize_candles(d, limit=500):
+    if d is None or len(d)==0:
+        return pd.DataFrame(columns=["time","open","high","low","close","volume"])
+    d=d.copy()
+    d=d.rename(columns={"t":"time","T":"time","timestamp":"time","date":"time",
+                        "o":"open","h":"high","l":"low","c":"close","v":"volume"})
+    if "time" not in d.columns:
+        raise RuntimeError("External candle data has no timestamp column")
+    raw_time=d["time"].copy()
+    d["time"]=pd.to_datetime(raw_time,unit="ms",utc=True,errors="coerce")
+    if d["time"].isna().all():
+        d["time"]=pd.to_datetime(raw_time,utc=True,errors="coerce")
+    for c in ["open","high","low","close"]:
+        if c not in d.columns:
+            raise RuntimeError(f"External candle data has no {c} column")
+        d[c]=pd.to_numeric(d[c],errors="coerce")
+    if "volume" not in d.columns:
+        d["volume"]=0.0
+    d["volume"]=pd.to_numeric(d["volume"],errors="coerce").fillna(0)
+    return d[["time","open","high","low","close","volume"]].dropna().sort_values("time").tail(limit).reset_index(drop=True)
+
+def _external_hip3_candles(coin,tf,limit=500):
+    # HyperAcademy publishes OHLC history sourced from the Hyperliquid
+    # market, so it is a read-only fallback when Hyperliquid's info endpoint
+    # returns HTTP 500 for a HIP-3 market.
+    if ":" not in coin:
+        raise RuntimeError("External fallback is only used for HIP-3 markets")
+    dex,ticker=coin.split(":",1)
+    slug=f"{dex.lower()}-{ticker.lower()}-perp"
+    end=pd.Timestamp.now(tz="UTC").date()
+    start=(pd.Timestamp.now(tz="UTC")-pd.Timedelta(days=180)).date()
+    url=f"https://hyperacademy.io/api/hl/markets/{slug}/history"
+    r=requests.get(url,params={"format":"csv","from":str(start),"to":str(end),"granularity":"hourly"},timeout=25)
+    r.raise_for_status()
+    d=pd.read_csv(StringIO(r.text),comment="#")
+    d=_normalize_candles(d,limit=10000)
+    if d.empty:
+        raise RuntimeError("External source returned no candles")
+    if tf in ("4h","3d","1d"):
+        rule={"4h":"4h","3d":"3D","1d":"1D"}[tf]
+        d=d.set_index("time").resample(rule).agg(
+            {"open":"first","high":"max","low":"min","close":"last","volume":"sum"}
+        ).dropna().reset_index()
+    else:
+        raise ValueError(f"Unsupported timeframe: {tf}")
+    return _normalize_candles(d,limit=limit)
+
 def candles(coin,tf,limit=500):
-    # Hyperliquid can return HTTP 500 for HIP-3 candle queries when the
-    # requested startTime predates the market's listing. For HIP-3 markets,
-    # first ask for the full available history (the API caps the response at
-    # 5000 candles) instead of guessing a listing date. Then keep a few
-    # fallbacks for transient/API range errors.
+    # Try Hyperliquid first. If a HIP-3 market such as xyz:CRCL gets a
+    # server-side 500, transparently fall back to HyperAcademy's published
+    # Hyperliquid-sourced OHLC history.
     ms={"4h":14400000,"1d":86400000,"3d":259200000}[tf]
     end=int(time.time()*1000)
     api_coin=resolve_coin(coin)
-    is_hip3=":" in api_coin
-    if is_hip3:
-        windows=[0,end-ms*500,end-ms*180,end-ms*120,end-ms*100]
-    else:
-        windows=[end-ms*(limit+5),end-ms*180,end-ms*120,end-ms*100]
+    windows=[limit]
+    if limit >= 500:
+        windows += [180,120,100]
     last_error=None
-    raw=None
-    for start in windows:
-        for attempt in range(2):
-            try:
-                raw=api({"type":"candleSnapshot","req":{
-                    "coin":api_coin,"interval":tf,"startTime":max(0,int(start)),"endTime":end
-                }})
-                if raw:
-                    break
-                last_error=RuntimeError(f"No candles returned for {api_coin} {tf}")
-            except requests.HTTPError as e:
-                last_error=e
-                if attempt == 0:
-                    time.sleep(0.6)
-                continue
-        if raw:
-            break
-    if raw is None:
-        raise last_error if last_error else RuntimeError("No candle data returned")
-    d=pd.DataFrame(raw)
-    if d.empty:return d
-    d["time"]=pd.to_datetime(d.t,unit="ms",utc=True)
-    for c in "ohlcv":
-        d[c]=pd.to_numeric(d[{"o":"o","h":"h","l":"l","c":"c","v":"v"}[c]],errors="coerce")
-    d=d.rename(columns={"o":"open","h":"high","l":"low","c":"close","v":"volume"})
-    return d[["time","open","high","low","close","volume"]].dropna().tail(limit).reset_index(drop=True)
+    for n in windows:
+        start=end-ms*(n+5)
+        try:
+            raw=api({"type":"candleSnapshot","req":{
+                "coin":api_coin,"interval":tf,"startTime":start,"endTime":end
+            }})
+            if raw:
+                d=pd.DataFrame(raw)
+                d["time"]=pd.to_datetime(d.t,unit="ms",utc=True)
+                for c in "ohlcv":
+                    d[c]=pd.to_numeric(d[{"o":"o","h":"h","l":"l","c":"c","v":"v"}[c]],errors="coerce")
+                d=d.rename(columns={"o":"open","h":"high","l":"low","c":"close","v":"volume"})
+                return d[["time","open","high","low","close","volume"]].dropna().tail(limit).reset_index(drop=True)
+        except requests.HTTPError as e:
+            last_error=e
+            continue
+    if ":" in api_coin:
+        try:
+            return _external_hip3_candles(api_coin,tf,limit)
+        except Exception as external_error:
+            raise RuntimeError(
+                f"Hyperliquid returned HTTP 500 and the external HIP-3 fallback also failed: {external_error}"
+            ) from last_error
+    raise last_error if last_error else RuntimeError("No candle data returned")
 
 def rma(s,n):
     return s.ewm(alpha=1/n,adjust=False,min_periods=n).mean()
@@ -350,7 +392,7 @@ with tabs[2]:
             d1=superkumo(candles(api_coin,"1d")); h4=superkumo(candles(api_coin,"4h")); d3=superkumo(candles(api_coin,"3d"))
             if d1.empty or h4.empty or d3.empty: st.error("No Hyperliquid candles returned. Check the perp name.")
             else:
-                st.caption("Hyperliquid API market: " + api_coin)
+                st.caption("Market: " + api_coin + (" • OHLC source: HyperAcademy (Hyperliquid-sourced fallback)" if ":" in api_coin else " • OHLC source: Hyperliquid API"))
                 p=build_plan(d1,h4); s,q,z=p["daily"],p["h4"],d3.iloc[-1]
                 st.divider()
                 x1,x2,x3,x4=st.columns(4)
@@ -391,7 +433,7 @@ with tabs[2]:
 **S/R:** 3-candle-confirmed swing highs/lows.
 """)
         except requests.HTTPError as ex:
-            st.error("SuperKumo API error: " + str(ex) + ". Try the bare ticker for native perps (ETH/ENA/TAO) or the DEX-qualified form for HIP-3 markets (e.g. xyz:CRCL).")
+            st.error("SuperKumo data error: " + str(ex) + ". HIP-3 markets such as xyz:CRCL automatically fall back to HyperAcademy when Hyperliquid returns HTTP 500.")
         except Exception as ex: st.error(f"SuperKumo error: {ex}")
 
 
