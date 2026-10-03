@@ -247,14 +247,15 @@ def native_chart(d):
     return fig
 def tv_symbol(x):
     x=x.strip().upper()
-    # TradingView's native Hyperliquid feed uses HYPERLIQUID:<BASE>USDT
-    # (without the .P suffix). HIP-3 Trade[XYZ] markets use HIP3XYZ:<BASE>.
+    # TradingView's Hyperliquid feed identifies core perpetuals by the
+    # underlying ticker, e.g. HYPERLIQUID:TAO. HIP-3 Trade[XYZ] uses
+    # HIP3XYZ:<TICKER>, e.g. HIP3XYZ:CRCL.
     if ":" in x:
         return x
     base=x.replace("USDT.P","").replace(".P","").replace("USDT","")
     if base in KNOWN_HIP3:
         return "HIP3XYZ:"+base
-    return "HYPERLIQUID:"+base+"USDT"
+    return "HYPERLIQUID:"+base
 
 def tv(sym,interval):
     cfg={"autosize":True,"symbol":sym,"interval":interval,"timezone":"exchange","theme":"dark","style":"1",
