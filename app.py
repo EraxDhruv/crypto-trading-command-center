@@ -77,7 +77,10 @@ def resolve_coin(coin):
         return c
     if c in KNOWN_HIP3:
         return KNOWN_HIP3[c]
-    return market_coin_map().get(c,c)
+    matches=market_coin_map().get(c,[])
+    if isinstance(matches,list) and len(matches)==1:
+        return matches[0]
+    return c
 
 def candles(coin,tf,limit=500):
     ms={"4h":14400000,"1d":86400000,"3d":259200000}[tf]; end=int(time.time()*1000)
