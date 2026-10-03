@@ -76,28 +76,37 @@ def resolve_coin(coin):
     return c
 
 def candles(coin,tf,limit=500):
-    # Some newer HIP-3 markets do not have history as far back as native
-    # markets. Start with a large window, then automatically retry with a
-    # shorter window if Hyperliquid rejects the older range.
+    # Hyperliquid can return HTTP 500 for HIP-3 candle queries when the
+    # requested startTime predates the market's listing. For HIP-3 markets,
+    # first ask for the full available history (the API caps the response at
+    # 5000 candles) instead of guessing a listing date. Then keep a few
+    # fallbacks for transient/API range errors.
     ms={"4h":14400000,"1d":86400000,"3d":259200000}[tf]
     end=int(time.time()*1000)
     api_coin=resolve_coin(coin)
-    windows=[limit]
-    if limit >= 500:
-        windows += [180,120,100]
+    is_hip3=":" in api_coin
+    if is_hip3:
+        windows=[0,end-ms*500,end-ms*180,end-ms*120,end-ms*100]
+    else:
+        windows=[end-ms*(limit+5),end-ms*180,end-ms*120,end-ms*100]
     last_error=None
     raw=None
-    for n in windows:
-        start=end-ms*(n+5)
-        try:
-            raw=api({"type":"candleSnapshot","req":{
-                "coin":api_coin,"interval":tf,"startTime":start,"endTime":end
-            }})
-            if raw:
-                break
-        except requests.HTTPError as e:
-            last_error=e
-            continue
+    for start in windows:
+        for attempt in range(2):
+            try:
+                raw=api({"type":"candleSnapshot","req":{
+                    "coin":api_coin,"interval":tf,"startTime":max(0,int(start)),"endTime":end
+                }})
+                if raw:
+                    break
+                last_error=RuntimeError(f"No candles returned for {api_coin} {tf}")
+            except requests.HTTPError as e:
+                last_error=e
+                if attempt == 0:
+                    time.sleep(0.6)
+                continue
+        if raw:
+            break
     if raw is None:
         raise last_error if last_error else RuntimeError("No candle data returned")
     d=pd.DataFrame(raw)
