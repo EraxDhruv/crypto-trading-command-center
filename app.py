@@ -349,8 +349,8 @@ with tabs[2]:
                 st.plotly_chart(native_chart(d1),use_container_width=True)
                 st.subheader("TradingView")
                 interval={"1D":"D","4H":"240","3D":"3D","1H":"60"}[tv_tf]
-                st.link_button("Open in TradingView", "https://www.tradingview.com/chart/", use_container_width=True)
-                st.caption("The TradingView chart uses the Hyperliquid feed. The SuperKumo verdict and levels above are independently calculated from Hyperliquid candles.")
+                st.link_button("Open in TradingView", "https://www.tradingview.com/chart/?symbol="+tv_symbol(coin).replace(":", "%3A"), use_container_width=True)
+                st.caption("Open the Hyperliquid market directly in TradingView Supercharts. The SuperKumo verdict and levels above are independently calculated from Hyperliquid candles.")
                 with st.expander("Indicator values"):
                     st.dataframe(d1[["time","close","tenkan","kijun","span_a","span_b","supertrend","adx","cloud","future_green","signal"]].tail(40),use_container_width=True,hide_index=True)
                 with st.expander("SuperKumo rules"):
