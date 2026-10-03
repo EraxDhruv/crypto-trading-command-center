@@ -61,6 +61,11 @@ def market_coin_map():
         pass
     return mapping
 
+# Explicit HIP-3 fallback for markets whose public metadata may be unavailable.
+KNOWN_HIP3={
+    "CRCL":"xyz:CRCL",
+}
+
 def resolve_coin(coin):
     c=coin.strip().upper()
     if ":" in c:
