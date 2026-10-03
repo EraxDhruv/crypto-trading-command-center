@@ -42,9 +42,39 @@ def positions(state):
           "Margin Used":float(p.get("marginUsed",0) or 0)})
     return pd.DataFrame(rows)
 
+@st.cache_data(ttl=300)
+def market_coin_map():
+    """Return user-friendly ticker -> Hyperliquid API coin names across all perp DEXs."""
+    mapping={}
+    try:
+        dexes=api({"type":"perpDexs"}) or []
+    except Exception:
+        dexes=[None]
+    for dex in dexes:
+        try:
+            payload={"type":"meta"}
+            if dex and isinstance(dex,dict) and dex.get("name"):
+                payload["dex"]=dex["name"]
+            meta=api(payload)
+            for u in (meta or {}).get("universe",[]):
+                name=str(u.get("name","")).upper()
+                if not name: continue
+                ticker=name.split(":")[-1]
+                mapping[ticker]=name
+                mapping[name]=name
+        except Exception:
+            continue
+    return mapping
+
+def resolve_coin(coin):
+    c=coin.strip().upper()
+    if ":" in c: return c
+    return market_coin_map().get(c,c)
+
 def candles(coin,tf,limit=500):
     ms={"4h":14400000,"1d":86400000,"3d":259200000}[tf]; end=int(time.time()*1000)
-    raw=api({"type":"candleSnapshot","req":{"coin":coin,"interval":tf,"startTime":end-ms*(limit+5),"endTime":end}})
+    api_coin=resolve_coin(coin)
+    raw=api({"type":"candleSnapshot","req":{"coin":api_coin,"interval":tf,"startTime":end-ms*(limit+5),"endTime":end}})
     d=pd.DataFrame(raw)
     if d.empty:return d
     d["time"]=pd.to_datetime(d.t,unit="ms",utc=True)
@@ -259,9 +289,11 @@ with tabs[2]:
     if run or st.session_state.get("sk_coin")==coin:
         st.session_state["sk_coin"]=coin
         try:
-            d1=superkumo(candles(coin,"1d")); h4=superkumo(candles(coin,"4h")); d3=superkumo(candles(coin,"3d"))
+            api_coin=resolve_coin(coin)
+            d1=superkumo(candles(api_coin,"1d")); h4=superkumo(candles(api_coin,"4h")); d3=superkumo(candles(api_coin,"3d"))
             if d1.empty or h4.empty or d3.empty: st.error("No Hyperliquid candles returned. Check the perp name.")
             else:
+                st.caption("Hyperliquid API market: " + api_coin)
                 p=build_plan(d1,h4); s,q,z=p["daily"],p["h4"],d3.iloc[-1]
                 st.divider()
                 x1,x2,x3,x4=st.columns(4)
@@ -301,6 +333,8 @@ with tabs[2]:
 **SELL:** inverse conditions.  
 **S/R:** 3-candle-confirmed swing highs/lows.
 """)
+        except requests.HTTPError as ex:
+            st.error("SuperKumo API error: " + str(ex) + ". The app now resolves HIP-3 tickers to their DEX-qualified market name automatically.")
         except Exception as ex: st.error(f"SuperKumo error: {ex}")
 
 
