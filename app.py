@@ -44,31 +44,39 @@ def positions(state):
 
 @st.cache_data(ttl=300)
 def market_coin_map():
-    """Return user-friendly ticker -> Hyperliquid API coin names across all perp DEXs."""
+    """Discover HIP-3 dex markets. Failure here must never block normal analysis."""
     mapping={}
     try:
-        dexes=api({"type":"perpDexs"}) or []
+        dexs=api({"type":"perpDexs"}) or []
+        for dex in dexs:
+            if not dex or not isinstance(dex,dict) or not dex.get("name"):
+                continue
+            dex_name=str(dex["name"]).lower()
+            try:
+                meta=api({"type":"meta","dex":dex_name})
+                for u in (meta or {}).get("universe",[]):
+                    name=str(u.get("name","")).upper()
+                    if name:
+                        mapping[name.split(":")[-1]]=name
+                        mapping[name]=name
+            except Exception:
+                continue
     except Exception:
-        dexes=[None]
-    for dex in dexes:
-        try:
-            payload={"type":"meta"}
-            if dex and isinstance(dex,dict) and dex.get("name"):
-                payload["dex"]=dex["name"]
-            meta=api(payload)
-            for u in (meta or {}).get("universe",[]):
-                name=str(u.get("name","")).upper()
-                if not name: continue
-                ticker=name.split(":")[-1]
-                mapping[ticker]=name
-                mapping[name]=name
-        except Exception:
-            continue
+        pass
     return mapping
+
+# Known HIP-3 markets that should work even if the discovery endpoint
+# temporarily returns an HTTP 500 from a hosted environment.
+KNOWN_HIP3={
+    "CRCL":"xyz:CRCL",
+}
 
 def resolve_coin(coin):
     c=coin.strip().upper()
-    if ":" in c: return c
+    if ":" in c:
+        return c
+    if c in KNOWN_HIP3:
+        return KNOWN_HIP3[c]
     return market_coin_map().get(c,c)
 
 def candles(coin,tf,limit=500):
