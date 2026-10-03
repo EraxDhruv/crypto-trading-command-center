@@ -212,6 +212,42 @@ def tv(sym,interval):
 <script src="https://s3.tradingview.com/external-embedding/embed-widget-advanced-chart.js" async>{json.dumps(cfg)}</script>'''
     components.html(html,height=700)
 
+tabs=st.tabs(["📊 Overview","💼 Hyperliquid Wallet","☁️ SuperKumo","👀 Watchlist","📝 Journal"])
+
+with tabs[0]:
+    st.title("Crypto Trading Command Center")
+    st.caption("Live read-only Hyperliquid tracking • SuperKumo rules engine")
+    try:
+        w,e=wallet_state(); state=w.get("state") or {}; p=positions(state); ms=state.get("marginSummary",{}) or {}
+        a,b,c,d=st.columns(4)
+        a.metric("Account Value",f"$ {float(ms.get('accountValue',0) or 0):,.2f}")
+        b.metric("Perp Exposure",f"$ {float(ms.get('totalNtlPos',0) or 0):,.2f}")
+        c.metric("Margin Used",f"$ {float(ms.get('totalMarginUsed',0) or 0):,.2f}")
+        d.metric("Open Positions",len(p))
+        if e: st.warning("Some wallet endpoints failed: "+" | ".join(e))
+        if len(p): st.dataframe(p,use_container_width=True,hide_index=True)
+        else: st.info("No open perp positions returned by Hyperliquid.")
+    except Exception as ex: st.error(str(ex))
+
+with tabs[1]:
+    st.header("💼 Hyperliquid Wallet")
+    st.code(WALLET)
+    if st.button("🔄 Refresh live wallet",type="primary"):
+        st.cache_data.clear(); st.rerun()
+    try:
+        w,e=wallet_state(); state=w.get("state") or {}; ms=state.get("marginSummary",{}) or {}; p=positions(state)
+        a,b,c,d=st.columns(4)
+        a.metric("Equity",f"$ {float(ms.get('accountValue',0) or 0):,.2f}")
+        b.metric("Position Value",f"$ {float(ms.get('totalNtlPos',0) or 0):,.2f}")
+        c.metric("Margin Used",f"$ {float(ms.get('totalMarginUsed',0) or 0):,.2f}")
+        d.metric("Withdrawable",f"$ {float(state.get('withdrawable',0) or 0):,.2f}")
+        if len(p): st.dataframe(p,use_container_width=True,hide_index=True)
+        else: st.info("No open positions returned.")
+        if e: st.error("\\n".join(e))
+        with st.expander("Open orders"): st.dataframe(pd.DataFrame(w.get("orders") or []),use_container_width=True,hide_index=True)
+        with st.expander("Recent fills"): st.dataframe(pd.DataFrame(w.get("fills") or []).head(100),use_container_width=True,hide_index=True)
+    except Exception as ex: st.error(f"Wallet error: {ex}")
+
 with tabs[2]:
     st.header("☁️ SuperKumo Analyzer")
     st.caption("1D = direction • 4H = adds/exits • 3D = context • signals after candle close")
@@ -266,3 +302,22 @@ with tabs[2]:
         except Exception as ex: st.error(f"SuperKumo error: {ex}")
 
 
+
+with tabs[3]:
+    st.header("👀 Watchlist")
+    f=DATA/"watchlist.csv"
+    df=pd.read_csv(f) if f.exists() else pd.DataFrame(columns=["Coin","Notes","Status"])
+    ed=st.data_editor(df,num_rows="dynamic",use_container_width=True,hide_index=True)
+    if st.button("Save Watchlist"):
+        ed.to_csv(f,index=False); st.success("Saved.")
+
+with tabs[4]:
+    st.header("📝 Journal")
+    f=DATA/"journal.csv"
+    df=pd.read_csv(f) if f.exists() else pd.DataFrame(columns=["Date","Coin","Horizon","Direction","Entry","Exit","P&L","Notes"])
+    ed=st.data_editor(df,num_rows="dynamic",use_container_width=True,hide_index=True)
+    if st.button("Save Journal"):
+        ed.to_csv(f,index=False); st.success("Saved.")
+
+st.divider()
+st.caption("Read-only Hyperliquid tracking. No orders are signed or submitted.")
