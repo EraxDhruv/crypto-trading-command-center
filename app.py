@@ -164,7 +164,9 @@ def superkumo(d):
     return d
 
 def levels(d):
-    x=d.dropna(subset=["close"]).copy()
+    # Use recent structure so an ancient low does not become the stop for a
+    # current trade. On the daily chart, ~180 candles is roughly six months.
+    x=d.dropna(subset=["close"]).tail(180).copy()
     price=float(x.close.iloc[-1])
     atr=float(x.atr.iloc[-1]) if pd.notna(x.atr.iloc[-1]) else price*0.03
     lows=x.loc[x.swing_low,"low"].dropna().tolist()
@@ -213,9 +215,16 @@ def build_plan(d1,h4):
         stop=min(candidates)+atr*.15 if candidates else price+1.5*atr
         tps=supports[:2] if len(supports)>=2 else [price-2*atr,price-4*atr]
     else:
-        entry=kijun; stop=supports[0]-atr*.15 if supports else kijun-1.25*atr
+        # HOLD means there is no active trade trigger. Do not manufacture an
+        # entry far below spot or a misleading R:R.
+        if verdict=="WAIT":
+            entry=kijun
+            stop=supports[0]-atr*.15 if supports else kijun-1.25*atr
+        else:
+            entry=np.nan
+            stop=supports[0]-atr*.15 if supports else np.nan
         tps=resistances[:2] if len(resistances)>=2 else [price+2*atr,price+4*atr]
-    risk=abs(entry-stop)
+    risk=abs(entry-stop) if pd.notna(entry) and pd.notna(stop) else np.nan
     return dict(verdict=verdict,signal=signal,price=price,daily=s,h4=q,entry=entry,stop=stop,
                 tp1=float(tps[0]),tp2=float(tps[1]),rr1=abs(tps[0]-entry)/risk if risk else np.nan,
                 rr2=abs(tps[1]-entry)/risk if risk else np.nan,support=supports[0] if supports else None,
@@ -242,13 +251,19 @@ def tv_symbol(x):
     return "HYPERLIQUID:"+x.replace("USDT.P","").replace(".P","").replace("USDT","")+"USDT.P"
 
 def tv(sym,interval):
-    cfg={"autosize":True,"symbol":sym,"interval":interval,"theme":"dark","style":"1",
+    cfg={"autosize":True,"symbol":sym,"interval":interval,"timezone":"exchange","theme":"dark","style":"1",
          "withdateranges":True,"hide_side_toolbar":False,"allow_symbol_change":True,
          "save_image":False,"studies":["IchimokuCloud@tv-basicstudies","Supertrend@tv-basicstudies","ADX@tv-basicstudies"],
-         "locale":"en","support_host":"https://www.tradingview.com"}
-    html=f'''<div id="tvchart" style="height:680px"></div>
-<script src="https://s3.tradingview.com/external-embedding/embed-widget-advanced-chart.js" async>{json.dumps(cfg)}</script>'''
-    components.html(html,height=700)
+         "locale":"en","support_host":"https://www.tradingview.com","calendar":False}
+    payload=json.dumps(cfg)
+    html=f'''<div class="tradingview-widget-container" style="height:100%;width:100%">
+<div class="tradingview-widget-container__widget" style="height:680px;width:100%"></div>
+<div class="tradingview-widget-copyright"><a href="https://www.tradingview.com/" rel="noopener nofollow" target="_blank">TradingView</a></div>
+<script type="text/javascript" src="https://s3.tradingview.com/external-embedding/embed-widget-advanced-chart.js" async>
+{payload}
+</script>
+</div>'''
+    components.html(html,height=700,scrolling=False)
 
 tabs=st.tabs(["📊 Overview","💼 Hyperliquid Wallet","☁️ SuperKumo","👀 Watchlist","📝 Journal"])
 
