@@ -57,8 +57,8 @@ def market_coin_map():
                 for u in (meta or {}).get("universe",[]):
                     name=str(u.get("name","")).upper()
                     if name:
-                        mapping[name.split(":")[-1]]=name
-                        mapping[name]=name
+                        mapping.setdefault(name.split(":")[-1],[]).append(name)
+                        mapping[name]=[name]
             except Exception:
                 continue
     except Exception:
