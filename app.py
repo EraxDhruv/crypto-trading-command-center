@@ -72,9 +72,7 @@ def resolve_coin(coin):
         return c
     if c in KNOWN_HIP3:
         return KNOWN_HIP3[c]
-    matches=market_coin_map().get(c,[])
-    if isinstance(matches,list) and len(matches)==1:
-        return matches[0]
+    # Native Hyperliquid perps use the bare ticker; avoid metadata discovery here because hosted API can return HTTP 500.
     return c
 
 def candles(coin,tf,limit=500):
