@@ -292,13 +292,15 @@ with tabs[2]:
                 with st.expander("Indicator values"):
                     st.dataframe(d1[["time","close","tenkan","kijun","span_a","span_b","supertrend","adx","cloud","future_green","signal"]].tail(40),use_container_width=True,hide_index=True)
                 with st.expander("SuperKumo rules"):
-                    st.markdown("**EARLY BUY:** Supertrend flip up.  
-**BUY:** above cloud + Supertrend up + ADX ≥20 + future cloud green.  
+                    st.markdown("""
+**EARLY BUY:** Supertrend flip up.  
+**BUY:** above cloud + Supertrend up + ADX >= 20 + future cloud green.  
 **BUY MORE:** BUY within 8 candles of EARLY BUY.  
 **ADD:** uptrend + Kijun pullback + close back above Tenkan.  
-**RISKY ADD:** shallow Tenkan reclaim with ADX ≥20.  
+**RISKY ADD:** shallow Tenkan reclaim with ADX >= 20.  
 **SELL:** inverse conditions.  
-**S/R:** 3-candle-confirmed swing highs/lows.")
+**S/R:** 3-candle-confirmed swing highs/lows.
+""")
         except Exception as ex: st.error(f"SuperKumo error: {ex}")
 
 
